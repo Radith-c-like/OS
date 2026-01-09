@@ -1,3 +1,4 @@
+#pragma once
 #ifndef BUFFERED_CHANNEL
 #define BUFFERED_CHANNEL
 
@@ -5,12 +6,20 @@
 #include <stdexcept>
 #include <mutex>
 #include <condition_variable>
+#include <utility>
 
 template<typename T>
 class BufferedChannel {
 public:
     explicit BufferedChannel(size_t buffer_size)
         : m_buffer_size(buffer_size), m_isClosed(false) {
+        if (buffer_size == 0) {
+            throw std::invalid_argument("buffer_size must be positive");
+        }
+    }
+
+    ~BufferedChannel() {
+        close();
     }
 
     void send(const T& value) {
@@ -28,11 +37,26 @@ public:
         m_not_empty.notify_one();
     }
 
+    void send(T&& value) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+
+        m_not_full.wait(lock, [this]() {
+            return m_isClosed || m_buffer.size() < m_buffer_size;
+            });
+
+        if (m_isClosed) {
+            throw std::runtime_error("Channel is closed");
+        }
+
+        m_buffer.push(std::move(value));
+        m_not_empty.notify_one();
+    }
+
     std::pair<T, bool> recv() {
         std::unique_lock<std::mutex> lock(m_mutex);
 
         m_not_empty.wait(lock, [this]() {
-            return m_isClosed || !m_buffer.empty();
+            return !m_buffer.empty() || (m_isClosed && m_buffer.empty());
             });
 
         if (!m_buffer.empty()) {
@@ -46,10 +70,12 @@ public:
     }
 
     void close() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_isClosed = true;
-        m_not_empty.notify_all();
-        m_not_full.notify_all();
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (!m_isClosed) {
+            m_isClosed = true;
+            m_not_empty.notify_all();
+            m_not_full.notify_all();
+        }
     }
 
 private:
